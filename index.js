@@ -1,10 +1,18 @@
 const Discord = require("discord.js");
+const https = require("https");
+const querystring = require("querystring");
 const fs = require("fs");
 
 const client = new Discord.Client({partials: ["MESSAGE", "CHANNEL", "REACTION"]});
 
 let shippingProviders = {};
 let admins = [];
+
+// TODO:
+// - select postage class (priority, etc)
+// - add customs items
+// - integrate with api
+
 
 /*
 [key]: {
@@ -20,7 +28,8 @@ let keys = {};
   shippingProvider: "ups",
   key: null,
   detailsStep: 0,
-  details: {}
+  details: {},
+  activityHash: "83djdk12"
 }
 */
 let currentInteractions = {}
@@ -28,7 +37,6 @@ let currentInteractions = {}
 let shippingDetails = [];
 
 function saveKeys() {
-  let keysArray = [];
   let json = JSON.stringify(Object.keys(keys), null, 2);
   fs.writeFileSync("./data/keys.json", json, "utf8");
 }
@@ -43,19 +51,23 @@ function createDataFiles() {
     fs.writeFileSync("./data/shipping_providers.json", JSON.stringify({
       "fedex": {
         id: "fedex",
-        name: "Fedex"
+        name: "Fedex",
+        api_id: 0
       },
       "fedex_international": {
         id: "fedex_international",
-        name: "Fedex International"
+        name: "Fedex International",
+        api_id: 3
       },
       "usps": {
         id: "usps",
-        name: "USPS"
+        name: "USPS",
+        api_id: 2
       },
       "ups": {
         id: "ups",
-        name: "UPS"
+        name: "UPS",
+        api_id: 5
       }
     }, null, 2), "utf8");
   }
@@ -77,9 +89,9 @@ function createDataFiles() {
       },
       {
         id: "FromStreet2",
-        prompt: "the second line of the senders street address",
+        prompt: "the second line of the sender's street address",
         optional: true,
-        optional_prompt: "Does you need to include the second line of the senders street address?"
+        optional_prompt: "Do you need to include the second line of the senders street address?"
       },
       {
         id: "FromCity",
@@ -87,7 +99,7 @@ function createDataFiles() {
       },
       {
         id: "FromState",
-        prompt: "the state that the package is being sent from"
+        prompt: "the sender's two letter state code"
       },
       {
         id: "FromZip",
@@ -97,6 +109,78 @@ function createDataFiles() {
       {
         id: "FromPhone",
         prompt: "the sender's phone number"
+      },
+      {
+        id: "ToCountry",
+        prompt: "the recipient's country"
+      },
+      {
+        id: "ToName",
+        prompt: "the name of the recipient"
+      },
+      {
+        id: "ToStreet",
+        prompt: "the recipient's street address"
+      },
+      {
+        id: "ToStreet2",
+        prompt: "the second line of the recipient's street address",
+        optional: true,
+        optional_prompt: "Do you need to include the second line of the recipient's street address?"
+      },
+      {
+        id: "ToCity",
+        prompt: "the city that the recipient lives in"
+      },
+      {
+        id: "ToState",
+        prompt: "the recipient's two letter state code"
+      },
+      {
+        id: "ToZip",
+        prompt: "the recipient's zip code",
+        type: "int"
+      },
+      {
+        id: "ToPhone",
+        prompt: "the recipient's phone number"
+      },
+      {
+        id: "Weight",
+        prompt: "the weight of the package"
+      },
+      {
+        id: "Length",
+        prompt: "the length of the package"
+      },
+      {
+        id: "Width",
+        prompt: "the width of the package"
+      },
+      {
+        id: "Height",
+        prompt: "the height of the package"
+      },
+      {
+        id: "SignatureRequired",
+        prompt: "Is a signature required on delivery?",
+        type: "bool"
+      },
+      {
+        id: "SaturdayShipping",
+        prompt: "Do you want your package to be able to be shipped on saturdays?",
+        type: "bool"
+      },
+      {
+        id: "Notes",
+        prompt: "the notes you want to include on the shipping label",
+        optional: true,
+        optional_prompt: "Do you want to include a custom note on the shipping label?"
+      },
+      {
+        id: "CustomsPrice",
+        prompt: "the customs price for the package",
+        type: "float"
       }
     ], null, 2), "utf8");
   }
@@ -175,6 +259,10 @@ function isAdmin(user) {
   return admins.includes(user.tag);
 }
 
+function updateActivityHash(interaction) {
+  interaction.activityHash = makeHash(8);
+}
+
 async function startNewLabel(user, shippingProvider) {
   resetInteraction(user, false);
 
@@ -182,8 +270,11 @@ async function startNewLabel(user, shippingProvider) {
     stage: "key",
     shippingProvider: shippingProvider,
     key: null,
-    details_step: 0,
-    details: {}
+    detailsStep: 0,
+    details: {
+      Provider: shippingProvider["api_id"]
+    },
+    activityHash: makeHash(8)
   };
 
   user.send(`You've chosen to create a shipping label for ${shippingProvider.name}. Please reply with your key to continue.`);
@@ -207,12 +298,53 @@ function resetInteraction(user, error=true) {
   delete currentInteractions[user.id];
 }
 
+async function getYesNoAnswer(user, message) {
+  await message.react("👍");
+  await message.react("👎");
+
+  const filter = (reaction, reactionUser) => (reaction.emoji.name === '👍' || reaction.emoji.name === "👎") && reactionUser.id === user.id;
+  return message.awaitReactions(filter, {max: 1, time: 30000}).then((collected) => {
+    let emoji = collected.first().emoji.name;
+
+    if (emoji === "👍") {
+      return true;
+    } else if (emoji === "👎") {
+      return false;
+    }
+  });
+}
+
+function nextDetailsStep(user, interaction) {
+  interaction.detailsStep += 1;
+  promptForShippingDetails(user, interaction);
+}
+
 function promptForRequiredShippingDetails(user, interaction, details) {
+  updateActivityHash(interaction);
+  let hash = interaction.activityHash;
+
+  if (details.type === "bool") {
+    user.send(details.prompt).then(async (message) => {
+      getYesNoAnswer(user, message).then((answer) => {
+        if (interaction.activityHash !== hash) return;
+        interaction.details[details.id] = answer;
+        nextDetailsStep(user, interaction);
+      }).catch(() => {
+        if (interaction.activityHash !== hash) return;
+
+        message.reply("You didn't respond in time!");
+        promptForRequiredShippingDetails(user, interaction, details);
+      });
+    });
+    return;
+  }
+
   user.send(`Please reply with ${details.prompt}`);
 }
 
 function promptForShippingDetails(user, interaction) {
-  let step = interaction.details_step;
+  updateActivityHash(interaction);
+  let step = interaction.detailsStep;
 
   if (step >= shippingDetails.length) {
     console.error(`Details step too high! (got ${step}, expected less than ${shippingDetails.length})`);
@@ -221,30 +353,23 @@ function promptForShippingDetails(user, interaction) {
   }
 
   let details = shippingDetails[step];
+  let hash = interaction.activityHash;
 
-  // Check if the user wants to enter this details
   if (details["optional"]) {
     user.send(details["optional_prompt"]).then(async (message) => {
-      await message.react("👍");
-      await message.react("👎");
+      getYesNoAnswer(user, message).then((answer) => {
+        if (interaction.activityHash !== hash) return;
 
-      const filter = (reaction, reactionUser) => (reaction.emoji.name === '👍' || reaction.emoji.name === "👎") && reactionUser.id === user.id;
-      message.awaitReactions(filter, {max: 1, time: 30000}).then((collected) => {
-        let emoji = collected.first().emoji.name;
-
-        if (interaction.details_step !== step) {
-          console.info("Reacted after step had already changed. Ignoring");
-          return;
-        }
-
-        if (emoji === "👍") {
+        if (answer) {
           promptForRequiredShippingDetails(user, interaction, details);
-        } else if (emoji === "👎") {
-          interaction.details_step += 1;
+        } else {
+          interaction.detailsStep += 1;
           continueLabelCreation(user);
         }
 
       }).catch(() => {
+        if (interaction.activityHash !== hash) return;
+
         message.reply("You didn't respond in time!");
         promptForShippingDetails(user);
       });
@@ -261,6 +386,7 @@ function continueLabelCreation(user) {
   }
 
   let interaction = currentInteractions[user.id];
+  updateActivityHash(interaction);
 
   switch (interaction.stage) {
     case "key":
@@ -276,7 +402,7 @@ function continueLabelCreation(user) {
 }
 
 function handleDetailsMessage(message, interaction) {
-  let step = interaction.details_step;
+  let step = interaction.detailsStep;
 
   if (step > shippingDetails.length) {
     console.error(`Details step too high! (got ${step}, expected less than ${shippingDetails.length})`);
@@ -284,12 +410,31 @@ function handleDetailsMessage(message, interaction) {
     return;
   }
 
+  let details = shippingDetails[step];
+
+  let input = message.content;
+
+  if (details.type === "bool") {
+    message.reply("Please respond with a 👍 or 👎 reaction!");
+    promptForRequiredShippingDetails(message.author, interaction, details);
+    return;
+  } else if (details.type === "int" || details.type === "float") {
+    if (isNaN(input)) {
+      message.reply("Please respond with a number")
+      promptForRequiredShippingDetails(message.author, interaction, details);
+      return;
+    }
+    if (details.type === "int") {
+      input = parseInt(input);
+    } else {
+      input = parseFloat(input);
+    }
+  }
+
   message.react("👍");
 
-  interaction.details[shippingDetails[step].id] = message.content;
-  interaction.details_step += 1;
-
-  promptForShippingDetails(message.author, interaction);
+  interaction.details[details.id] = input;
+  nextDetailsStep(message.author, interaction);
 }
 
 // Respond to a DM that wasn't sent by ourselves
@@ -366,26 +511,29 @@ client.on("messageReactionAdd", async (reaction, user) => {
     let currentInteraction = currentInteractions[user.id];
     let currentProvider = shippingProviders[currentInteraction.shippingProvider];
 
-    let msgContent = `You've requested to create a new shipping label with ${shippingProvider.name}, do you want reset your current ${currentProvider.name} label?`;
+    let currentProviderName = "";
+    if (currentProvider) {
+      currentProviderName = `${currentProvider.name} `;
+    }
 
+    updateActivityHash(currentInteraction);
+    let hash = currentInteraction.activityHash;
+
+    let msgContent = `You've requested to create a new shipping label with ${shippingProvider.name}, do you want reset your current ${currentProviderName}label?`;
     user.send(msgContent).then(async (message) => {
-      await message.react("👍");
-      await message.react("👎");
+      getYesNoAnswer(user, message).then((answer) => {
+        if (currentInteraction.activityHash !== hash) return;
 
-      const filter = (reaction, reactionUser) => (reaction.emoji.name === '👍' || reaction.emoji.name === "👎") && reactionUser.id === user.id;
-      message.awaitReactions(filter, {max: 1, time: 30000}).then((collected) => {
-        let emoji = collected.first().emoji.name;
-
-        if (emoji === "👍") {
+        if (answer) {
           startNewLabel(user, shippingProvider);
-        } else if (emoji === "👎") {
+        } else {
           message.reply("Okay, continuing your existing label creation...");
-          continueLabelCreation(user.id);
+          continueLabelCreation(user);
         }
-
       }).catch(() => {
+        if (currentInteraction.activityHash !== hash) return;
         message.reply("You didn't respond in time! Continuing your existing label creation...")
-        continueLabelCreation(user.id);
+        continueLabelCreation(user);
       });
     });
 
