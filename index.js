@@ -36,6 +36,70 @@ let currentInteractions = {}
 
 let shippingDetails = [];
 
+function handleAPIResponse(user, orderDetails, response) {
+  if (!response["Success"]) {
+    console.error("API Error", orderDetails, response);
+    user.send("Failed to create label: " + response["Error"]);
+    return;
+  }
+
+  console.info("API Result", response);
+  user.send("Label created successfully!");
+
+  let interaction = currentInteractions[user.id];
+  if (interaction) {
+    if (interaction.key) {
+      console.info(`User ${user.tag} used key ${interaction.key}`);
+      delete keys[interaction.key];
+      saveKeys();
+    }
+
+    delete currentInteractions[user.id];
+  }
+}
+
+function makeOrder(user, orderDetails) {
+  let data = querystring.stringify(orderDetails);
+
+  let options = {
+    host: "aio.gg",
+    port: 443,
+    method: "POST",
+    path: "/api/order",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Length": data.length,
+      "Auth": process.env.AIO_API_KEY
+    }
+  };
+
+  let req = https.request(options, (res) => {
+    let result = "";
+    res.on("data", (chunk) => {
+      result += chunk;
+    });
+
+    res.on("end", () => {
+      console.info("POST data", result);
+      let res = JSON.parse(result);
+      handleAPIResponse(user, orderDetails, res);
+    });
+
+    res.on("error", (err) => {
+      console.error("Error fetching API response", err);
+      resetInteraction(user);
+    });
+  });
+
+  req.on("error", (err) => {
+    console.error("Error making API request", err);
+    resetInteraction(user);
+  })
+
+  req.write(data);
+  req.end();
+}
+
 function saveKeys() {
   let json = JSON.stringify(Object.keys(keys), null, 2);
   fs.writeFileSync("./data/keys.json", json, "utf8");
@@ -316,6 +380,15 @@ async function getYesNoAnswer(user, message) {
 
 function nextDetailsStep(user, interaction) {
   interaction.detailsStep += 1;
+
+  // Check if we've finished filling out all the required details
+  if (interaction.detailsStep >= shippingDetails.length) {
+    user.send("Making api request...");
+    console.info("Making api request", interaction.details);
+    makeOrder(user, interaction.details);
+    return;
+  }
+
   promptForShippingDetails(user, interaction);
 }
 
