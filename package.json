@@ -1,0 +1,14 @@
+{
+  "name": "shippingbot",
+  "version": "1.0.0",
+  "description": "Create AIO.gg shipping labels with a Discord bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "Raph Hennessy",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^12.5.3"
+  }
+}
