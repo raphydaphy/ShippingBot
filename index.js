@@ -41,6 +41,8 @@ let currentInteractions = {}
 let shippingDetails = [];
 let logSettings = [];
 
+let apiSettings = {};
+
 function handleAPIResponse(user, orderDetails, response) {
   if (!response["Success"]) {
     console.error("API Error", orderDetails, response);
@@ -98,7 +100,7 @@ function makeOrder(user, orderDetails) {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "Content-Length": data.length,
-      "Auth": process.env.AIO_API_KEY
+      "Auth": apiSettings["aio_key"]
     }
   };
 
@@ -331,6 +333,16 @@ function createDataFiles() {
     console.info("No keys file found. An empty key list has been created");
     saveKeys();
   }
+
+  if (!fs.existsSync("./data/api.json")) {
+    fs.writeFileSync("./data/api.json", JSON.stringify({
+      aio_key: "",
+      discord_token: ""
+    }, null, 2));
+
+    console.error("No API configuration file found! Please add your API keys to api.json and rerun the program!");
+    process.exit(1);
+  }
 }
 
 function loadData() {
@@ -338,6 +350,7 @@ function loadData() {
   shippingDetails = JSON.parse(fs.readFileSync("./data/shipping_details.json", "utf8"));
   admins = JSON.parse(fs.readFileSync("./data/admins.json", "utf8"));
   logSettings = JSON.parse(fs.readFileSync("./data/logging.json", "utf8"));
+  apiSettings = JSON.parse(fs.readFileSync("./data/api.json", "utf8"));
 
   let keysArray = JSON.parse(fs.readFileSync("./data/keys.json", "utf8"));
   keys = {};
@@ -787,4 +800,4 @@ client.on('message', (message) => {
 createDataFiles();
 loadData();
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(apiSettings["discord_token"]);
