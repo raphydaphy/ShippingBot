@@ -5,13 +5,13 @@ const fs = require("fs");
 
 const client = new Discord.Client({partials: ["MESSAGE", "CHANNEL", "REACTION"]});
 
+const NUMBERS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"];
+
 let shippingProviders = {};
 let admins = [];
 
 // TODO:
-// - select postage class (priority, etc)
 // - add customs items
-// - integrate with api
 
 
 /*
@@ -25,7 +25,11 @@ let keys = {};
 /*
 [userId]: {
   stage: "key" | "shipping_details",
-  shippingProvider: "ups",
+  shippingProvider: {
+    id: "ups",
+    name: "UPS",
+    api_id: 5
+  },
   key: null,
   detailsStep: 0,
   details: {},
@@ -35,19 +39,44 @@ let keys = {};
 let currentInteractions = {}
 
 let shippingDetails = [];
+let logSettings = [];
 
 function handleAPIResponse(user, orderDetails, response) {
   if (!response["Success"]) {
     console.error("API Error", orderDetails, response);
-    user.send("Failed to create label: " + response["Error"]);
+    let error = response["Error"];
+
+    if (Array.isArray(error)) {
+      error = "\n";
+      for (let err of response["Error"]) {
+        error += ` - ${err["Error"]}\n`;
+      }
+    }
+
+    user.send("Failed to create label: " + error);
+
+    let interaction = currentInteractions[user.id];
+    let provider = interaction ? `${interaction.shippingProvider.name} ` : "";
+
+    if (logSettings["enabled_logs"]["order_failed"]) {
+      broadcastLog(`${user.tag} completed their ${provider}label order and received the following error message: ${error}`);
+    }
+
+    resetInteraction(user, false);
     return;
   }
 
   console.info("API Result", response);
   user.send("Label created successfully!");
 
+
   let interaction = currentInteractions[user.id];
   if (interaction) {
+
+    if (logSettings["enabled_logs"]["order_complete"]) {
+      broadcastLog(`${user.tag} completed their ${interaction.shippingProvider.name} label order and received the response message '${response}'`);
+    }
+
     if (interaction.key) {
       console.info(`User ${user.tag} used key ${interaction.key}`);
       delete keys[interaction.key];
@@ -110,6 +139,21 @@ function createDataFiles() {
     fs.mkdirSync("./data/");
   }
 
+  if (!fs.existsSync("./data/logging.json")) {
+    console.info("No logging settings file found, recreating the default configuration");
+    fs.writeFileSync("./data/logging.json", JSON.stringify({
+      log_channels: [
+        "864442984116518943"
+      ],
+      enabled_logs: {
+        key_created: false,
+        order_started: true,
+        order_complete: true,
+        order_failed: true
+      }
+    }, null, 2));
+  }
+
   if (!fs.existsSync("./data/shipping_providers.json")) {
     console.info("No shipping providers file found, recreating the default configuration");
     fs.writeFileSync("./data/shipping_providers.json", JSON.stringify({
@@ -132,7 +176,12 @@ function createDataFiles() {
         id: "ups",
         name: "UPS",
         api_id: 5
-      }
+      },
+      "usps3": {
+        id: "usps3",
+        name: "USPS3",
+        api_id: 4
+      },
     }, null, 2), "utf8");
   }
 
@@ -145,7 +194,8 @@ function createDataFiles() {
       },
       {
         id: "FromName",
-        prompt: "the name of the sender"
+        prompt: "the name of the sender",
+        min_length: 3
       },
       {
         id: "FromStreet",
@@ -180,7 +230,8 @@ function createDataFiles() {
       },
       {
         id: "ToName",
-        prompt: "the name of the recipient"
+        prompt: "the name of the recipient",
+        min_length: 3
       },
       {
         id: "ToStreet",
@@ -211,19 +262,36 @@ function createDataFiles() {
       },
       {
         id: "Weight",
-        prompt: "the weight of the package"
+        prompt: "the weight of the package",
+        type: "int"
       },
       {
         id: "Length",
-        prompt: "the length of the package"
+        prompt: "the length of the package",
+        type: "float"
       },
       {
         id: "Width",
-        prompt: "the width of the package"
+        prompt: "the width of the package",
+        type: "float"
       },
       {
         id: "Height",
-        prompt: "the height of the package"
+        prompt: "the height of the package",
+        type: "float"
+      },
+      {
+        id: "Class",
+        prompt: "Please select the class of your package using the corresponding reaction",
+        type: "select",
+        options: [
+          "First Overnight",
+          "Priority Overnight",
+          "Standard Overnight",
+          "2 Day",
+          "Express Save",
+          "Ground"
+        ]
       },
       {
         id: "SignatureRequired",
@@ -269,6 +337,7 @@ function loadData() {
   shippingProviders = JSON.parse(fs.readFileSync("./data/shipping_providers.json", "utf8"));
   shippingDetails = JSON.parse(fs.readFileSync("./data/shipping_details.json", "utf8"));
   admins = JSON.parse(fs.readFileSync("./data/admins.json", "utf8"));
+  logSettings = JSON.parse(fs.readFileSync("./data/logging.json", "utf8"));
 
   let keysArray = JSON.parse(fs.readFileSync("./data/keys.json", "utf8"));
   keys = {};
@@ -278,6 +347,15 @@ function loadData() {
       code: "key",
       stage: "free"
     }
+  }
+}
+
+async function broadcastLog(message) {
+  for (let channelId of logSettings["log_channels"]) {
+    let channel = await client.channels.fetch(channelId);
+    if (!channel) continue;
+
+    await channel.send(message);
   }
 }
 
@@ -342,6 +420,10 @@ async function startNewLabel(user, shippingProvider) {
   };
 
   user.send(`You've chosen to create a shipping label for ${shippingProvider.name}. Please reply with your key to continue.`);
+
+  if (logSettings["enabled_logs"]["order_started"]) {
+    broadcastLog(`${user.tag} initiated a new ${shippingProvider.name} label order`);
+  }
 }
 
 function resetInteraction(user, error=true) {
@@ -363,8 +445,7 @@ function resetInteraction(user, error=true) {
 }
 
 async function getYesNoAnswer(user, message) {
-  await message.react("👍");
-  await message.react("👎");
+  message.react("👍").then(message.react("👎"));
 
   const filter = (reaction, reactionUser) => (reaction.emoji.name === '👍' || reaction.emoji.name === "👎") && reactionUser.id === user.id;
   return message.awaitReactions(filter, {max: 1, time: 30000}).then((collected) => {
@@ -375,6 +456,22 @@ async function getYesNoAnswer(user, message) {
     } else if (emoji === "👎") {
       return false;
     }
+  });
+
+}
+
+async function getNumberAnswer(user, message, options) {
+  message.react(NUMBERS[0]).then(async () => {
+    for (let i = 1; i < options; i++) {
+      await message.react(NUMBERS[i]);
+    }
+  });
+
+  const filter = (reaction, reactionUser) => NUMBERS.includes(reaction.emoji.name) && reactionUser.id === user.id;
+  return message.awaitReactions(filter, {max: 1, time: 30000}).then((collected) => {
+    let emoji = collected.first().emoji.name;
+
+    return NUMBERS.indexOf(emoji) + 1;
   });
 }
 
@@ -399,6 +496,25 @@ function promptForRequiredShippingDetails(user, interaction, details) {
   if (details.type === "bool") {
     user.send(details.prompt).then(async (message) => {
       getYesNoAnswer(user, message).then((answer) => {
+        if (interaction.activityHash !== hash) return;
+        interaction.details[details.id] = answer;
+        nextDetailsStep(user, interaction);
+      }).catch(() => {
+        if (interaction.activityHash !== hash) return;
+
+        message.reply("You didn't respond in time!");
+        promptForRequiredShippingDetails(user, interaction, details);
+      });
+    });
+    return;
+  } else if (details.type === "select") {
+    let prompt = details.prompt + "\n\n";
+    for (let i = 0; i < details.options.length; i++) {
+      prompt += `${NUMBERS[i]} ${details.options[i]}\n`;
+    }
+
+    user.send(prompt).then(async (message) => {
+      getNumberAnswer(user, message, details.options.length).then((answer) => {
         if (interaction.activityHash !== hash) return;
         interaction.details[details.id] = answer;
         nextDetailsStep(user, interaction);
@@ -485,10 +601,19 @@ function handleDetailsMessage(message, interaction) {
 
   let details = shippingDetails[step];
 
+  if (!details) {
+    resetInteraction(message.author);
+    return;
+  }
+
   let input = message.content;
 
   if (details.type === "bool") {
     message.reply("Please respond with a 👍 or 👎 reaction!");
+    promptForRequiredShippingDetails(message.author, interaction, details);
+    return;
+  } else if (details.type === "select") {
+    message.reply("Please respond with the emoji reaction that corresponds to your choice");
     promptForRequiredShippingDetails(message.author, interaction, details);
     return;
   } else if (details.type === "int" || details.type === "float") {
@@ -501,6 +626,12 @@ function handleDetailsMessage(message, interaction) {
       input = parseInt(input);
     } else {
       input = parseFloat(input);
+    }
+  } else if (details.min_length > 0) {
+    if (input.length < details.min_length) {
+      message.reply(`Your response must be at least ${details.min_length} characters long!`);
+      promptForRequiredShippingDetails(message.author, interaction, details);
+      return;
     }
   }
 
@@ -631,6 +762,10 @@ client.on('message', (message) => {
 
     let key = createKey();
     message.author.send(`Your single use shipping key is **${key}**`);
+
+    if (logSettings["enabled_logs"]["key_created"]) {
+      broadcastLog(`${message.author.tag} created the key \`${key}\``)
+    }
 
     return;
   }
