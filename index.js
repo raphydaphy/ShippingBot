@@ -17,6 +17,7 @@ let admins = [];
 /*
 [key]: {
   code: "key",
+  provider: "fedex",
   stage: "free" | "using"
 }
  */
@@ -132,7 +133,15 @@ function makeOrder(user, orderDetails) {
 }
 
 function saveKeys() {
-  let json = JSON.stringify(Object.keys(keys), null, 2);
+  let statelessKeys = [];
+  for (let code of Object.keys(keys)) {
+    let key = keys[code];
+    statelessKeys.push({
+      code: key["code"],
+      provider: key["provider"]
+    });
+  }
+  let json = JSON.stringify(statelessKeys, null, 2);
   fs.writeFileSync("./data/keys.json", json, "utf8");
 }
 
@@ -355,9 +364,11 @@ function loadData() {
   let keysArray = JSON.parse(fs.readFileSync("./data/keys.json", "utf8"));
   keys = {};
 
-  for (const code of keysArray) {
+  for (const key of keysArray) {
+    let code = key["code"];
     keys[code] = {
-      code: "key",
+      code: code,
+      provider: key["provider"],
       stage: "free"
     }
   }
@@ -381,12 +392,13 @@ function makeHash(length) {
   return result;
 }
 
-function createKey(length = 8) {
+function createKey(provider, length = 8) {
   let code = makeHash(length);
   if (keys.hasOwnProperty(code)) return createKey(length);
 
   keys[code] = {
     code: code,
+    provider: provider.id,
     stage: "free"
   };
 
@@ -676,6 +688,10 @@ function handleDM(message) {
         message.reply("That key is not available for use!");
         continueLabelCreation(user);
         return;
+      } else if (!interaction.shippingProvider || keys[code].provider !== interaction.shippingProvider.id) {
+        message.reply("That key is only available for use with " + shippingProviders[keys[code].provider].name + " orders!");
+        continueLabelCreation(user);
+        return;
       }
 
       interaction.key = code;
@@ -764,20 +780,35 @@ client.on('message', (message) => {
   // Ignore our own messages
   if (message.author.id === client.user.id) return;
 
-  if (message.content === "!shipping key") {
+  if (message.content.startsWith("!shipping key")) {
     if (!isAdmin(message.author)) {
       message.reply("You don't have permission to generate a shipping key!");
       return;
     }
 
+    let args = message.content.split(" ");
+    if (args.length < 3) {
+      message.reply("Please specify the shipping provider that the key will work with (e.g. `!shipping key fedex`)");
+      return;
+    }
+
+    let provider = args[2];
+    if (!shippingProviders.hasOwnProperty(provider)) {
+      let providerList = Object.keys(shippingProviders).join(", ");
+      message.reply("Invalid provider! You can use any of the following providers: " + providerList);
+      return;
+    }
+
+    provider = shippingProviders[provider];
+
     // We can only delete messages if they are in a server
     if (message.guild) message.delete();
 
-    let key = createKey();
-    message.author.send(`Your single use shipping key is **${key}**`);
+    let key = createKey(provider);
+    message.author.send(`Your single use ${provider.name} shipping key is **${key}**`);
 
     if (logSettings["enabled_logs"]["key_created"]) {
-      broadcastLog(`${message.author.tag} created the key \`${key}\``)
+      broadcastLog(`${message.author.tag} created the ${provider.name} key \`${key}\``)
     }
 
     return;
