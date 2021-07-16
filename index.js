@@ -1,9 +1,11 @@
 const Discord = require("discord.js");
+const PasteClient = require("pastebin-api").default;
 const https = require("https");
 const querystring = require("querystring");
 const fs = require("fs");
 
-const client = new Discord.Client({partials: ["MESSAGE", "CHANNEL", "REACTION"]});
+const discord = new Discord.Client({partials: ["MESSAGE", "CHANNEL", "REACTION"]});
+let pastebin = null;
 
 const NUMBERS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"];
 
@@ -44,7 +46,31 @@ let logSettings = [];
 
 let apiSettings = {};
 
-function handleAPIResponse(user, orderDetails, response) {
+async function handleAPIResponse(user, orderDetails, res) {
+  let response;
+  try {
+    response = JSON.parse(result);
+  } catch (err) {
+    let interaction = currentInteractions[user.id];
+    let provider = interaction ? `${interaction.shippingProvider.name} ` : "";
+
+    const pasteUrl = await pastebin.createPaste({
+      code: res,
+      expireDate: "N",
+      name: "Shipping Bot Error Log",
+      publicity: 0
+    });
+
+    user.send("Failed to create label: An unexpected error occurred! (" + pasteUrl + ")");
+
+    if (logSettings["enabled_logs"]["order_failed"]) {
+      broadcastLog(`${user.tag} completed their ${provider}label order and received the following error response: \n${pasteUrl}`);
+    }
+
+    resetInteraction(user, false);
+    return;
+  }
+
   if (!response["Success"]) {
     console.error("API Error", orderDetails, response);
     let error = response["Error"];
@@ -131,8 +157,7 @@ function makeOrder(user, orderDetails) {
 
     res.on("end", () => {
       console.info("POST data", result);
-      let res = JSON.parse(result);
-      handleAPIResponse(user, orderDetails, res);
+      handleAPIResponse(user, orderDetails, result);
     });
 
     res.on("error", (err) => {
@@ -263,7 +288,8 @@ function createDataFiles() {
       },
       {
         id: "FromPhone",
-        prompt: "the sender's phone number"
+        prompt: "the sender's phone number",
+        type: "int"
       },
       {
         id: "ToCountry",
@@ -301,7 +327,8 @@ function createDataFiles() {
       },
       {
         id: "ToPhone",
-        prompt: "the recipient's phone number"
+        prompt: "the recipient's phone number",
+        type: "int"
       },
       {
         id: "Weight",
@@ -380,7 +407,8 @@ function createDataFiles() {
   if (!fs.existsSync("./data/api.json")) {
     fs.writeFileSync("./data/api.json", JSON.stringify({
       aio_key: "",
-      discord_token: ""
+      discord_token: "",
+      pastebin_key: ""
     }, null, 2));
 
     console.error("No API configuration file found! Please add your API keys to api.json and rerun the program!");
@@ -410,7 +438,7 @@ function loadData() {
 
 async function broadcastLog(message) {
   for (let channelId of logSettings["log_channels"]) {
-    let channel = await client.channels.fetch(channelId);
+    let channel = await discord.channels.fetch(channelId);
     if (!channel) continue;
 
     await channel.send(message);
@@ -762,11 +790,11 @@ function handleDM(message) {
   }
 }
 
-client.on("ready", () => {
-  console.log(`Logged in as ${client.user.tag}!`);
+discord.on("ready", () => {
+  console.log(`Logged in as ${discord.user.tag}!`);
 });
 
-client.on("messageReactionAdd", async (reaction, user) => {
+discord.on("messageReactionAdd", async (reaction, user) => {
   // If the message was sent before the bot started running, we need to fetch it
   if (reaction.partial) {
     try {
@@ -781,7 +809,7 @@ client.on("messageReactionAdd", async (reaction, user) => {
   if (!reaction.message.guild) return;
 
   // We only want to listen to reactions on our own messages that aren't by us
-  if (user.id === client.user.id || reaction.message.author.id !== client.user.id) return;
+  if (user.id === discord.user.id || reaction.message.author.id !== discord.user.id) return;
 
   await reaction.users.remove(user);
 
@@ -835,9 +863,9 @@ client.on("messageReactionAdd", async (reaction, user) => {
   await startNewLabel(user, shippingProvider);
 })
 
-client.on('message', (message) => {
+discord.on('message', (message) => {
   // Ignore our own messages
-  if (message.author.id === client.user.id) return;
+  if (message.author.id === discord.user.id) return;
 
   if (message.content.startsWith("!shipping key")) {
     if (!isAdmin(message.author)) {
@@ -890,4 +918,5 @@ client.on('message', (message) => {
 createDataFiles();
 loadData();
 
-client.login(apiSettings["discord_token"]);
+pastebin = new PasteClient(apiSettings["pastebin_key"]);
+discord.login(apiSettings["discord_token"]);
