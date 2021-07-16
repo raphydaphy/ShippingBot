@@ -69,15 +69,33 @@ function handleAPIResponse(user, orderDetails, response) {
     return;
   }
 
-  console.info("API Result", response);
-  user.send("Label created successfully!");
+  console.info("API Result:", response);
+
+  let order = response["Data"]["Order"];
+
+  let formattedOrder = "";
+
+  for (let key in Object.keys(order)) {
+    let value = order[key];
+    if (Array.isArray(value)) {
+      // TODO: customs items (if needed)
+      continue;
+    } else if (!value) {
+      console.info("Skipping empty key " + key);
+      continue;
+    }
+
+    formattedOrder += ` - **${key}**: ${value}`;
+  }
+
+  user.send("Your label was created successfully:\n " + formattedOrder);
 
 
   let interaction = currentInteractions[user.id];
   if (interaction) {
 
     if (logSettings["enabled_logs"]["order_complete"]) {
-      broadcastLog(`${user.tag} completed their ${interaction.shippingProvider.name} label order and received the response message '${response}'`);
+      broadcastLog(`${user.tag} created the following label:\n` + formattedOrder);
     }
 
     if (interaction.key) {
@@ -171,27 +189,37 @@ function createDataFiles() {
       "fedex": {
         id: "fedex",
         name: "Fedex",
-        api_id: 0
+        api_id: 0,
+        international: false,
+        enabled: true
       },
       "fedex_international": {
         id: "fedex_international",
         name: "Fedex International",
-        api_id: 3
+        api_id: 3,
+        international: true,
+        enabled: true
       },
       "usps": {
         id: "usps",
         name: "USPS",
-        api_id: 2
+        api_id: 2,
+        international: false,
+        enabled: true
       },
       "ups": {
         id: "ups",
         name: "UPS",
-        api_id: 5
+        api_id: 5,
+        international: true,
+        enabled: true
       },
       "usps3": {
         id: "usps3",
         name: "USPS3",
-        api_id: 4
+        api_id: 4,
+        international: false,
+        enabled: true
       },
     }, null, 2), "utf8");
   }
@@ -201,7 +229,9 @@ function createDataFiles() {
     fs.writeFileSync("./data/shipping_details.json", JSON.stringify([
       {
         id: "FromCountry",
-        prompt: "the country that you are sending the package from"
+        prompt: "the country that you are sending the package from",
+        international_only: true,
+        international_default: "United States",
       },
       {
         id: "FromName",
@@ -237,7 +267,9 @@ function createDataFiles() {
       },
       {
         id: "ToCountry",
-        prompt: "the recipient's country"
+        prompt: "the recipient's country",
+        international_only: true,
+        international_default: "United States",
       },
       {
         id: "ToName",
@@ -292,6 +324,13 @@ function createDataFiles() {
         type: "float"
       },
       {
+        id: "CustomsPrice",
+        prompt: "the customs price for the package",
+        type: "float",
+        international_only: true,
+        international_default: 0
+      },
+      {
         id: "Class",
         prompt: "Please select the class of your package using the corresponding reaction",
         type: "select",
@@ -319,11 +358,6 @@ function createDataFiles() {
         prompt: "the notes you want to include on the shipping label",
         optional: true,
         optional_prompt: "Do you want to include a custom note on the shipping label?"
-      },
-      {
-        id: "CustomsPrice",
-        prompt: "the customs price for the package",
-        type: "float"
       }
     ], null, 2), "utf8");
   }
@@ -511,6 +545,14 @@ function nextDetailsStep(user, interaction) {
     return;
   }
 
+  let detail = shippingDetails[interaction.detailsStep];
+  let provider = interaction.shippingProvider;
+
+  if (detail["international_only"] && !provider["international"]) {
+    interaction.details[detail["id"]] = detail["international_default"];
+    return nextDetailsStep(user, interaction);
+  }
+
   promptForShippingDetails(user, interaction);
 }
 
@@ -577,8 +619,7 @@ function promptForShippingDetails(user, interaction) {
         if (answer) {
           promptForRequiredShippingDetails(user, interaction, details);
         } else {
-          interaction.detailsStep += 1;
-          continueLabelCreation(user);
+          nextDetailsStep(user, interaction);
         }
 
       }).catch(() => {
@@ -701,6 +742,15 @@ function handleDM(message) {
       saveKeys();
 
       message.react("👍");
+
+      let detail = shippingDetails[interaction.detailsStep];
+      let provider = interaction.shippingProvider;
+
+      if (detail["international_only"] && !provider["international"]) {
+        interaction.details[detail["id"]] = detail["international_default"];
+        return nextDetailsStep(user, interaction);
+      }
+
       continueLabelCreation(user);
       return;
     case "shipping_details":
@@ -738,6 +788,15 @@ client.on("messageReactionAdd", async (reaction, user) => {
   // Only listen for shipping emoji reactions
   if (!Object.keys(shippingProviders).includes(reaction.emoji.name)) return;
   let shippingProvider = shippingProviders[reaction.emoji.name];
+
+  if (!shippingProvider["enabled"]) {
+    await user.send(`You've requested to create a new shipping label with ${shippingProvider.name}, but that provider is currently disabled. Please select a different provider.`);
+
+    if (currentInteractions.hasOwnProperty(user.id)) {
+      continueLabelCreation(user);
+    }
+    return;
+  }
 
   // If the user already has an ongoing interaction, check if they want to restart it
   if (currentInteractions.hasOwnProperty(user.id)) {
@@ -792,7 +851,7 @@ client.on('message', (message) => {
       return;
     }
 
-    let provider = args[2];
+    let provider = args[2].toLowerCase();
     if (!shippingProviders.hasOwnProperty(provider)) {
       let providerList = Object.keys(shippingProviders).join(", ");
       message.reply("Invalid provider! You can use any of the following providers: " + providerList);
