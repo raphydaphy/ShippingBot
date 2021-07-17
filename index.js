@@ -46,10 +46,127 @@ let logSettings = [];
 
 let apiSettings = {};
 
+/*
+[orderId]: {
+  user: "raphy#6535",
+  orderId: "728221ce-f77e-cbfe-510f-e38879d53be1"
+}
+ */
+let pendingOrders = {};
+
+async function getParsedOrderInfo(orderId) {
+  try {
+    let info = JSON.parse(await getOrderInfo(orderId));
+    if (!info["Success"] || !info["Data"] || !info["Data"]["Order"]) {
+      console.error("Failed to get order #" + orderId + ":", info);
+      return null;
+    }
+    let orderData = info["Data"]["Order"];
+    let status = orderData["Status"];
+
+    if (status !== 2) {
+      console.info("Order #" + orderId + " is not done ");
+      return null;
+    }
+
+    return orderData;
+  } catch (err) {
+    console.error("Failed to check order #" + orderId + ":", err);
+    return null;
+  }
+}
+
+async function checkPendingOrders() {
+  let finishedOrders = [];
+  console.info("Checking pending orders..");
+  for (const orderId in pendingOrders) {
+    let pendingOrder = pendingOrders[orderId];
+    let orderInfo = await getParsedOrderInfo(orderId);
+    if (orderInfo != null) {
+      console.info("Order #" + orderId + " is finished!");
+      finishedOrders.push(orderId);
+      let filename = await getOrderPdf(orderId);
+      let user = await discord.users.fetch(pendingOrder.user);
+
+
+      let orderFromPlace = orderInfo["FromName"] + " at " + orderInfo["FromStreet"] + " " + orderInfo["FromCity"] + ", " + orderInfo["FromState"] + " " + orderInfo["FromZip"] + " " + orderInfo["FromCountry"];
+      let orderToPlace = orderInfo["ToName"] + " at " + orderInfo["ToStreet"] + " " + orderInfo["ToCity"] + ", " + orderInfo["ToState"] + " " + orderInfo["ToZip"] + " " + orderInfo["ToCountry"];
+
+      let orderFormatted = "**Provider:** " + orderInfo["ProviderName"] + "\n";
+      orderFormatted += "**Created At:** " + orderInfo["AddedFormatted"] + "\n";
+      orderFormatted += "**To:** " + orderToPlace + "\n";
+      orderFormatted += "**From:** " + orderFromPlace + "\n";
+      if (orderInfo["TrackLink"]) {
+        orderFormatted += "**Tracking Link:** " + orderInfo["TrackLink"] + "\n";
+      }
+      orderFormatted += "**Class:** " + orderInfo["ClassFormatted"] + "\n";
+
+      if (!user) {
+        console.error("Couldn't find user #" + pendingOrder.user + " for pending order #" + orderId);
+      } else {
+        await user.send(
+          "Your shipping label is ready! \n\n" + orderFormatted, {
+            files: [
+              filename
+            ]
+          }
+        );
+      }
+
+      if (logSettings["enabled_logs"]["order_done"]) {
+        broadcastLog(`${user.tag}'s order is ready\n\n` + orderFormatted, {
+          files: [
+            filename
+          ]
+        });
+      }
+    }
+  }
+
+  finishedOrders.forEach((orderId) => {
+    console.info("Deleting pending order #" + orderId + " as it is finished");
+    delete pendingOrders[orderId];
+  });
+  savePendingOrders();
+}
+
+function formatOrder(order) {
+  let formattedOrder = "";
+
+  for (const key in order) {
+    let value = order[key];
+    if (Array.isArray(value) || value === "" || value === null || value === undefined) {
+      continue;
+    }
+
+    formattedOrder += ` - **${key}**: ${value}\n`;
+  }
+
+  return formattedOrder;
+}
+
+function formatShippingDetails(order) {
+  let formattedOrder = "";
+
+  shippingDetails.forEach((detail) => {
+    if (!order.hasOwnProperty(detail.id)) return;
+    let value = order[detail.id];
+
+    if (Array.isArray(value) || value === "" || value === null || value === undefined) return;
+
+    if (detail.type === "select" && detail.options.length >= value) {
+      value = detail.options[value - 1];
+    }
+
+    formattedOrder += ` - **${detail.id}**: ${value}\n`;
+  });
+  return formattedOrder;
+}
+
 async function handleAPIResponse(user, orderDetails, res) {
   let response;
   try {
-    response = JSON.parse(result);
+    response = JSON.parse(res);
   } catch (err) {
     let interaction = currentInteractions[user.id];
     let provider = interaction ? `${interaction.shippingProvider.name} ` : "";
@@ -98,30 +215,31 @@ async function handleAPIResponse(user, orderDetails, res) {
   console.info("API Result:", response);
 
   let order = response["Data"]["Order"];
+  let orderId = order["ID"];
 
-  let formattedOrder = "";
+  pendingOrders[orderId] = {
+    user: user.id,
+    orderId: orderId
+  };
 
-  for (let key in Object.keys(order)) {
-    let value = order[key];
-    if (Array.isArray(value)) {
-      // TODO: customs items (if needed)
-      continue;
-    } else if (!value) {
-      console.info("Skipping empty key " + key);
-      continue;
-    }
+  savePendingOrders();
 
-    formattedOrder += ` - **${key}**: ${value}`;
-  }
+  let formattedOrder = formatOrder(order);
 
-  user.send("Your label was created successfully:\n " + formattedOrder);
+  const pasteUrl = await pastebin.createPaste({
+    code: formattedOrder,
+    expireDate: "N",
+    name: "Shipping Order Details",
+    publicity: 0
+  });
 
+  user.send("Your label order was placed successfully! Once the label has been generated, we'll send you a message. You can view the order details here: " + pasteUrl);
 
   let interaction = currentInteractions[user.id];
   if (interaction) {
 
-    if (logSettings["enabled_logs"]["order_complete"]) {
-      broadcastLog(`${user.tag} created the following label:\n` + formattedOrder);
+    if (logSettings["enabled_logs"]["order_placed"]) {
+      broadcastLog(`${user.tag} placed a label order using the key \`${interaction.key}\`. Response log: ` + pasteUrl);
     }
 
     if (interaction.key) {
@@ -132,6 +250,81 @@ async function handleAPIResponse(user, orderDetails, res) {
 
     delete currentInteractions[user.id];
   }
+}
+
+async function getOrderPdf(orderId) {
+  return new Promise((resolve, reject) => {
+    let options = {
+      host: "aio.gg",
+      port: 443,
+      method: "GET",
+      path: "/api/order/" + orderId + "/file",
+      headers: {
+        "Auth": apiSettings["aio_key"]
+      }
+    };
+
+    let file = "./orders/" + orderId + ".pdf";
+
+    if (!fs.existsSync("./orders")) fs.mkdirSync("./orders");
+    fs.writeFileSync(file, "");
+
+    let req = https.request(options, (res) => {
+      res.on("data", (chunk) => {
+        fs.appendFileSync(file, chunk);
+      });
+
+      res.on("end", () => {
+        resolve(file);
+      });
+
+      res.on("error", (err) => {
+        reject(err);
+      });
+    });
+
+    req.on("error", (err) => {
+      reject(err);
+    })
+
+    req.end();
+  });
+}
+
+async function getOrderInfo(orderId) {
+  return new Promise((resolve, reject) => {
+    let options = {
+      host: "aio.gg",
+      port: 443,
+      method: "GET",
+      path: "/api/order/" + orderId + "/info",
+      headers: {
+        "Auth": apiSettings["aio_key"]
+      }
+    };
+
+
+    let req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => {
+        data += chunk;
+      });
+
+      res.on("end", () => {
+        resolve(data);
+      });
+
+      res.on("error", (err) => {
+        reject(err);
+      });
+    });
+
+    req.on("error", (err) => {
+      reject(err);
+    })
+
+    req.end();
+  });
 }
 
 function makeOrder(user, orderDetails) {
@@ -188,6 +381,10 @@ function saveKeys() {
   fs.writeFileSync("./data/keys.json", json, "utf8");
 }
 
+function savePendingOrders() {
+  fs.writeFileSync("./data/pending_orders.json", JSON.stringify(pendingOrders, null, 2), "utf8");
+}
+
 function createDataFiles() {
   if (!fs.existsSync("./data/")) {
     fs.mkdirSync("./data/");
@@ -202,8 +399,9 @@ function createDataFiles() {
       enabled_logs: {
         key_created: false,
         order_started: true,
-        order_complete: true,
-        order_failed: true
+        order_placed: true,
+        order_failed: true,
+        order_done: true
       }
     }, null, 2));
   }
@@ -398,10 +596,14 @@ function createDataFiles() {
     ], null, 2), "utf8");
   }
 
-
   if (!fs.existsSync("./data/keys.json")) {
     console.info("No keys file found. An empty key list has been created");
     saveKeys();
+  }
+
+  if (!fs.existsSync("./data/pending_orders.json")) {
+    console.info("No orders file found, recreating the default configuration");
+    savePendingOrders();
   }
 
   if (!fs.existsSync("./data/api.json")) {
@@ -422,6 +624,7 @@ function loadData() {
   admins = JSON.parse(fs.readFileSync("./data/admins.json", "utf8"));
   logSettings = JSON.parse(fs.readFileSync("./data/logging.json", "utf8"));
   apiSettings = JSON.parse(fs.readFileSync("./data/api.json", "utf8"));
+  pendingOrders = JSON.parse(fs.readFileSync("./data/pending_orders.json", "utf8"));
 
   let keysArray = JSON.parse(fs.readFileSync("./data/keys.json", "utf8"));
   keys = {};
@@ -436,12 +639,12 @@ function loadData() {
   }
 }
 
-async function broadcastLog(message) {
+async function broadcastLog(message, extra) {
   for (let channelId of logSettings["log_channels"]) {
     let channel = await discord.channels.fetch(channelId);
     if (!channel) continue;
 
-    await channel.send(message);
+    await channel.send(message, extra);
   }
 }
 
@@ -501,7 +704,8 @@ async function startNewLabel(user, shippingProvider) {
     key: null,
     detailsStep: 0,
     details: {
-      Provider: shippingProvider["api_id"]
+      Provider: shippingProvider["api_id"],
+      ScheduleEnabled: 0
     },
     activityHash: makeHash(8)
   };
@@ -562,14 +766,41 @@ async function getNumberAnswer(user, message, options) {
   });
 }
 
+function confirmDetails(user, interaction) {
+  let formattedOrder = formatShippingDetails(interaction.details);
+  user.send("Do these details look correct: \n" + formattedOrder).then((message) => {
+    updateActivityHash(interaction);
+    let hash = interaction.activityHash;
+    getYesNoAnswer(user, message).then((answer) => {
+      if (interaction.activityHash !== hash) return;
+      if (answer) {
+        user.send("Making api request...");
+        console.info("Making api request", interaction.details);
+        makeOrder(user, interaction.details);
+      } else {
+        interaction.details = [];
+        interaction.detailsStep = 0;
+        interaction.stage = "shipping_details";
+        user.send("Okay, restarting the label creation process...");
+        continueLabelCreation(user);
+        updateActivityHash(interaction);
+      }
+    }).catch((err) => {
+      if (interaction.activityHash !== hash) return;
+      user.send("You didn't respond in time!");
+      confirmDetails(user, interaction);
+    })
+  });
+}
+
 function nextDetailsStep(user, interaction) {
   interaction.detailsStep += 1;
 
   // Check if we've finished filling out all the required details
   if (interaction.detailsStep >= shippingDetails.length) {
-    user.send("Making api request...");
-    console.info("Making api request", interaction.details);
-    makeOrder(user, interaction.details);
+
+    interaction.stage = "confirm";
+    confirmDetails(user, interaction);
     return;
   }
 
@@ -784,6 +1015,10 @@ function handleDM(message) {
     case "shipping_details":
       handleDetailsMessage(message, interaction);
       return;
+    case "confirm":
+      user.send("Please confirm your order using the 👍 or 👎 reaction emojis!");
+      confirmDetails(user, interaction);
+      return;
     default:
       resetInteraction(user);
       return;
@@ -899,6 +1134,36 @@ discord.on('message', (message) => {
     }
 
     return;
+  } else if (message.content.startsWith("!shipping label")) {
+    if (!isAdmin(message.author)) {
+      message.reply("You don't have permission to lookup an order!");
+      return;
+    }
+
+    let args = message.content.split(" ");
+    if (args.length < 3) {
+      message.reply("Please specify the order that you'd like to lookup (e.g. `!shipping order d44e2d54-3402-326e-8626-a36c68091fa9`)");
+      return;
+    }
+
+    let orderId = args[2];
+
+    if (message.guild) message.delete();
+
+    message.author.send("Fetching order #" + orderId + ", please wait...");
+    getOrderPdf(orderId).then((filename) => {
+      message.author.send(
+        "Here is the shipping label you requested", {
+          files: [
+            filename
+          ]
+        }
+      );
+    }).catch((err) => {
+      console.error("Failed to get shipping label #" + orderId + ":", err);
+      message.author.send("Failed to get shipping label #" + orderId);
+    })
+    return;
   }
 
   // If this is a direct message, we need to handle it separately
@@ -920,3 +1185,7 @@ loadData();
 
 pastebin = new PasteClient(apiSettings["pastebin_key"]);
 discord.login(apiSettings["discord_token"]);
+
+// Check orders every minute
+checkPendingOrders();
+setInterval(checkPendingOrders, 60 * 1000);
